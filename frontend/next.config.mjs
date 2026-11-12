@@ -3,8 +3,17 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+function normalizeBackendUrl(raw) {
+  let val = String(raw || "").trim().replace(/^['"]|['"]$/g, "");
+  if (!val) return "http://127.0.0.1:4000";
+  if (!/^https?:\/\//i.test(val)) {
+    val = `https://${val}`;
+  }
+  return val.replace(/\/+$/, "");
+}
+
 /** @type {import('next').NextConfig} */
-const backendUrl = (process.env.BACKEND_URL || "http://127.0.0.1:4000").replace(/\/+$/, "");
+const backendUrl = normalizeBackendUrl(process.env.BACKEND_URL);
 
 const nextConfig = {
   outputFileTracingRoot: __dirname,

@@ -1,5 +1,6 @@
 import cors from "cors";
 import express from "express";
+import { loadConfig } from "./config.js";
 import { createDatabase, nowTs, utcIso } from "./db.js";
 import { RateLimiter } from "./security.js";
 import { PortalError, PortalService } from "./services.js";
@@ -621,4 +622,18 @@ export function createApp(config) {
 
   return { app, db, service };
 }
+
+let cachedDefaultApp = null;
+
+/**
+ * Default Express handler export for Vercel zero-config Node/Express runtime
+ * when `src/app.js` is invoked directly as a serverless entrypoint.
+ */
+export default function handler(req, res) {
+  if (!cachedDefaultApp) {
+    cachedDefaultApp = createApp(loadConfig()).app;
+  }
+  return cachedDefaultApp(req, res);
+}
+
 

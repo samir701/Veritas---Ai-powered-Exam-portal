@@ -646,6 +646,9 @@ test("PostgreSQL placeholder translation preserves quoted literals and Vercel ha
 
   const { default: vercelApp } = await import("../api/index.js");
   assert.equal(typeof vercelApp, "function");
+
+  const { default: appHandler } = await import("../src/app.js");
+  assert.equal(typeof appHandler, "function");
 });
 
 

@@ -4,6 +4,13 @@ A full-stack, browser-based MCQ assessment platform built for companies, intervi
 
 ---
 
+## Screenshots
+
+### Admin & Staff Portal Overview
+![Veritas Exam Portal — Admin Dashboard](docs/screenshots/admin-dashboard.png)
+
+---
+
 ## Key Features
 
 ### Organization, Roles & Security

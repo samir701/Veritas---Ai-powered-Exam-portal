@@ -1,0 +1,15 @@
+node_modules/
+.next/
+out/
+.vercel/
+data/
+*.db
+*.db-shm
+*.db-wal
+.secret_key
+.env
+.env.local
+.env.*.local
+.cert/
+npm-debug.log*
+.DS_Store

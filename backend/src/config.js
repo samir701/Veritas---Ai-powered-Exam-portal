@@ -99,5 +99,6 @@ export function loadConfig(overrides = {}) {
     rateLimitAuthPerMin: Number(overrides.rateLimitAuthPerMin ?? process.env.EXAM_PORTAL_RATE_AUTH ?? 25),
     rateLimitApiPerMin: Number(overrides.rateLimitApiPerMin ?? process.env.EXAM_PORTAL_RATE_API ?? 180),
     groqApiKey: String(overrides.groqApiKey ?? process.env.GROQ_API_KEY ?? "").trim(),
+    groqModel: String(overrides.groqModel ?? process.env.GROQ_MODEL ?? "qwen/qwen3.8-27b").trim(),
   };
 }

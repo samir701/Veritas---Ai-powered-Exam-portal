@@ -150,6 +150,7 @@ Add these Environment Variables in Vercel:
 - `EXAM_PORTAL_COOKIE_SAMESITE`: `Lax`
 - `CORS_ORIGIN`: `https://<your-frontend-domain>.vercel.app`
 - `GROQ_API_KEY`: Groq Cloud API key (from [console.groq.com](https://console.groq.com)) for AI face tracking analysis
+- `GROQ_MODEL`: `qwen/qwen3.8-27b` (recommended default), `openai/gpt-oss-120b`, or `openai/gpt-oss-20b`
 
 ### Frontend Project (`Root Directory: frontend`)
 Add this Environment Variable in Vercel:

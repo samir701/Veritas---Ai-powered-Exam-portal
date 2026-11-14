@@ -24,9 +24,10 @@ function getGroqClient(apiKey) {
  * @param {object} signals - { windowSeconds, faceAbsentCount, multipleFacesCount, gazeDeviationCount, totalFrames, examTitle }
  * @param {string} attemptId
  * @param {string} apiKey - GROQ_API_KEY
+ * @param {string} preferredModel - Optional model name override
  * @returns {Promise<{risk: string, verdict: string, flags: string[]}>}
  */
-export async function analyzeFaceSignals(signals, attemptId, apiKey) {
+export async function analyzeFaceSignals(signals, attemptId, apiKey, preferredModel = "") {
   const groq = getGroqClient(apiKey);
   if (!groq) {
     return { risk: "unknown", verdict: "Groq API key not configured. Face signals recorded but not analyzed.", flags: [] };
@@ -64,33 +65,52 @@ Respond ONLY with valid JSON in this exact format (no markdown, no explanation o
 
 Risk levels: low = no significant anomalies, medium = suspicious patterns, high = strong cheating indicators.`;
 
-  try {
-    const completion = await groq.chat.completions.create({
-      model: "llama-3.1-8b-instant",
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.1,
-      max_tokens: 200,
-    });
+  const modelCandidates = [
+    preferredModel,
+    process.env.GROQ_MODEL,
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "llama-3.1-8b-instant",
+  ].filter(Boolean);
 
-    const raw = completion.choices[0]?.message?.content?.trim() || "";
-    // Extract JSON even if there's surrounding text
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      const parsed = JSON.parse(jsonMatch[0]);
-      const result = {
-        risk: ["low", "medium", "high"].includes(parsed.risk) ? parsed.risk : "medium",
-        verdict: String(parsed.verdict || "Analysis complete."),
-        flags: Array.isArray(parsed.flags) ? parsed.flags : [],
-      };
-      verdictCache.set(attemptId, { ...result, updatedAt: Date.now() });
-      return result;
+  let lastError = null;
+
+  for (const model of modelCandidates) {
+    try {
+      const completion = await groq.chat.completions.create({
+        model,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.1,
+        max_tokens: 250,
+      });
+
+      const choice = completion.choices[0]?.message;
+      const raw = (choice?.content || choice?.reasoning || "").trim();
+      // Extract JSON even if there's surrounding text or thought process
+      const jsonMatch = raw.match(/\{[\s\S]*?\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        const result = {
+          risk: ["low", "medium", "high"].includes(parsed.risk) ? parsed.risk : "medium",
+          verdict: String(parsed.verdict || "Analysis complete."),
+          flags: Array.isArray(parsed.flags) ? parsed.flags : [],
+          modelUsed: model,
+        };
+        verdictCache.set(attemptId, { ...result, updatedAt: Date.now() });
+        return result;
+      }
+      throw new Error(`No JSON in response from model ${model}: ${raw.slice(0, 100)}`);
+    } catch (err) {
+      lastError = err;
+      // If error suggests model not found or rate limit, try the next model candidate
+      continue;
     }
-    throw new Error("No JSON in Groq response: " + raw);
-  } catch (err) {
-    const fallback = { risk: "unknown", verdict: `Analysis error: ${err.message}`, flags: [] };
-    verdictCache.set(attemptId, { ...fallback, updatedAt: Date.now() });
-    return fallback;
   }
+
+  const fallback = { risk: "unknown", verdict: `Analysis error: ${lastError?.message || "All models failed"}`, flags: [] };
+  verdictCache.set(attemptId, { ...fallback, updatedAt: Date.now() });
+  return fallback;
 }
 
 /** Get the latest cached verdict for an attempt */

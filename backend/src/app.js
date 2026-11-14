@@ -638,7 +638,7 @@ export function createApp(config) {
       let riskResult = { risk: "unknown", verdict: "Pending analysis.", flags: [] };
       if (signals && typeof signals === "object" && Object.keys(signals).length > 0) {
         const { analyzeFaceSignals } = await import("./groq-analysis.js");
-        riskResult = await analyzeFaceSignals(signals, attemptId, config.groqApiKey);
+        riskResult = await analyzeFaceSignals(signals, attemptId, config.groqApiKey, config.groqModel);
       }
 
       res.json({ recorded: events.length, ...riskResult });

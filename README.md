@@ -26,13 +26,17 @@ A full-stack, browser-based MCQ assessment platform built for companies, intervi
 - **Server-Side Scoring:** Answer keys and grading logic stay strictly on the server and are never sent to the candidate browser prior to submission.
 
 ### Proportionate Exam Integrity & Live Webcam Preview
+- **AI Face Tracking Anti-Cheat (Groq LLM):**
+  - Real-time client-side face tracking powered by `@vladmandic/face-api` (TinyFaceDetector + 68-point landmarks) running directly in the candidate's browser via WebAssembly/TensorFlow.js.
+  - Detects **face presence**, **multiple faces** (unauthorized helpers), and **gaze deviation** (looking away at notes/phone) without streaming raw video recordings to the backend.
+  - Aggregated signal windows are analyzed in real time by **Groq (`llama-3.1-8b-instant`)** to generate an automated cheating risk verdict (Low, Medium, High) with human-readable reasoning and risk flags displayed live in the admin portal.
 - **Strict Lockdown Options:**
   - `auto_submit_on_violation`: Automatically submits the attempt and logs the reason (`tab_switched` / `fullscreen_exited`) if a candidate switches tabs or exits fullscreen.
   - `lock_copy_paste`: Blocks copy, cut, paste, text selection, drag, context menu, and clipboard/DevTools shortcuts inside the exam view while logging `copy_paste_blocked` events.
 - **Live Webcam Monitoring:**
   - Admins/interviewers can require live webcam monitoring **per exam** or **per candidate invitation** (toggleable anytime).
   - Real-time preview inside the **Live Webcam** tab and **Attempt Review** modal via WebSocket relay (`/live-webcam`) with automatic HTTPS/serverless frame fallback—**zero video recordings or history are written to disk**.
-- **Human-Review Context:** Browser signals (tab switches, window blur, fullscreen exits, offline/reconnect events) are presented strictly as review context rather than automated misconduct verdicts.
+- **Human-Review Context:** Browser signals (tab switches, window blur, fullscreen exits, face tracking events) are presented strictly as review context rather than automated misconduct verdicts.
 
 ---
 
@@ -145,6 +149,7 @@ Add these Environment Variables in Vercel:
 - `EXAM_PORTAL_COOKIE_SECURE`: `1`
 - `EXAM_PORTAL_COOKIE_SAMESITE`: `Lax`
 - `CORS_ORIGIN`: `https://<your-frontend-domain>.vercel.app`
+- `GROQ_API_KEY`: Groq Cloud API key (from [console.groq.com](https://console.groq.com)) for AI face tracking analysis
 
 ### Frontend Project (`Root Directory: frontend`)
 Add this Environment Variable in Vercel:

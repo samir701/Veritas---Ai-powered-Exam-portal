@@ -651,5 +651,75 @@ test("PostgreSQL placeholder translation preserves quoted literals and Vercel ha
   assert.equal(typeof appHandler, "function");
 });
 
+test("AI face tracking events recorded and face analysis endpoint returns counts and verdict", async (t) => {
+  const srv = await startTestServer();
+  t.after(() => srv.close());
+
+  const admin = new HttpClient(srv.baseUrl);
+  await registerOrg(admin, "Face Test Org", "admin@face.test");
+
+  const qRes = await admin.request("POST", "/api/questions", {
+    prompt: "Sample Q",
+    points: 1.0,
+    options: [{ text: "A", is_correct: true }, { text: "B", is_correct: false }],
+  });
+
+  const exRes = await admin.request("POST", "/api/exams", {
+    title: "Face Monitored Exam",
+    duration_minutes: 30,
+    status: "published",
+    question_ids: [qRes.data.question.id],
+    require_live_webcam: true,
+  });
+
+  const invRes = await admin.request("POST", "/api/invitations", {
+    exam_id: exRes.data.exam.id,
+    candidate_name: "Face Candidate",
+    candidate_email: "cand@face.test",
+  });
+  const rawToken = invRes.data.invitation.invite_token;
+  const cand = new HttpClient(srv.baseUrl);
+  const sess = await cand.request("POST", "/api/candidate/start", {
+    token: rawToken,
+    consent_accepted: true,
+    webcam_consent_choice: "consented",
+  });
+  assert.equal(sess.status, 200);
+  const attemptId = sess.data.attempt.id;
+
+  // Candidate posts face tracking events and signals
+  const faceRes = await fetch(`${srv.baseUrl}/api/candidate/face-events`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Candidate-Token": rawToken,
+    },
+    body: JSON.stringify({
+      events: [
+        { type: "face_absent", detail: "candidate looked away", occurred_at: new Date().toISOString() },
+        { type: "multiple_faces", detail: "second person in frame", occurred_at: new Date().toISOString() },
+      ],
+      signals: {
+        windowSeconds: 10,
+        faceAbsentCount: 1,
+        multipleFacesCount: 1,
+        gazeDeviationCount: 0,
+        totalFrames: 20,
+        examTitle: "Face Monitored Exam",
+      },
+    }),
+  });
+  assert.equal(faceRes.status, 200);
+  const faceData = await faceRes.json();
+  assert.equal(faceData.recorded, 2);
+
+  // Admin checks face analysis
+  const anaRes = await admin.request("GET", `/api/attempts/${attemptId}/face-analysis`);
+  assert.equal(anaRes.status, 200);
+  assert.equal(anaRes.data.attemptId, attemptId);
+  assert.equal(anaRes.data.event_counts.face_absent, 1);
+  assert.equal(anaRes.data.event_counts.multiple_faces, 1);
+});
+
 
 

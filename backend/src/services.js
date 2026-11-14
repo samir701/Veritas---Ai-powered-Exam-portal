@@ -32,6 +32,11 @@ const ALLOWED_CANDIDATE_EVENTS = new Set([
   "accommodation_requested",
   "copy_paste_blocked",
   "heartbeat",
+  // Face tracking anti-cheat events
+  "face_absent",
+  "multiple_faces",
+  "gaze_deviation",
+  "face_detected",
 ]);
 
 export class PortalError extends Error {
@@ -2146,6 +2151,9 @@ export class PortalService {
         fullscreen_exited: events.filter((e) => e.event_type === "fullscreen_exited").length,
         copy_paste_blocked: events.filter((e) => e.event_type === "copy_paste_blocked").length,
         network_interruptions: events.filter((e) => e.event_type === "offline" || e.event_type === "reconnected").length,
+        face_absent: events.filter((e) => e.event_type === "face_absent").length,
+        multiple_faces: events.filter((e) => e.event_type === "multiple_faces").length,
+        gaze_deviation: events.filter((e) => e.event_type === "gaze_deviation").length,
       };
 
       return {
@@ -2499,6 +2507,13 @@ export class PortalService {
       ip_address: r.ip_address,
       created_at: utcIso(r.created_at),
     }));
+  }
+
+  async getAttemptEvents(attemptId) {
+    return this.db.all(
+      "SELECT * FROM session_events WHERE attempt_id = ? ORDER BY server_received_at ASC",
+      attemptId
+    );
   }
 }
 

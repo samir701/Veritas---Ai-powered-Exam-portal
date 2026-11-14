@@ -3,6 +3,7 @@
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { apiFetch, getApiBase, getWebSocketUrl, postCandidateLiveFrame } from "../../lib/api";
+import { FaceTracker } from "../../lib/face-tracker";
 
 async function requestCameraStream(constraints) {
   if (typeof window === "undefined" || typeof navigator === "undefined") {
@@ -92,6 +93,8 @@ function CandidateExamRunner() {
   const liveTimerRef = useRef(null);
   const liveStreamObjRef = useRef(null);
   const liveTokenRef = useRef(null);
+  const faceTrackerRef = useRef(null);
+  const [faceStatus, setFaceStatus] = useState({ status: "idle", message: "" });
 
   const stopMedia = useCallback(() => {
     if (mediaStreamRef.current) {
@@ -117,6 +120,11 @@ function CandidateExamRunner() {
     if (liveVideoRef.current) {
       liveVideoRef.current.srcObject = null;
     }
+    if (faceTrackerRef.current) {
+      faceTrackerRef.current.stop();
+      faceTrackerRef.current = null;
+    }
+    setFaceStatus({ status: "idle", message: "" });
     liveTokenRef.current = null;
     setLiveStreamingActive(false);
     setLiveCamError("");
@@ -448,6 +456,34 @@ function CandidateExamRunner() {
       liveVideoRef.current.srcObject = liveStreamObjRef.current;
     }
   }, [liveStreamingActive]);
+
+  // AI Face tracking proctoring loop
+  useEffect(() => {
+    if (liveStreamingActive && liveVideoRef.current && step === "exam") {
+      if (!faceTrackerRef.current) {
+        const tracker = new FaceTracker({
+          onStatus: (st) => setFaceStatus(st),
+          onEvents: async ({ events, signals }) => {
+            try {
+              await apiFetch("/api/candidate/face-events", {
+                method: "POST",
+                candidateToken: token,
+                body: { events, signals },
+              });
+            } catch {
+              // Silently ignore reporting hiccups to prevent disrupting candidate
+            }
+          },
+        });
+        faceTrackerRef.current = tracker;
+        tracker.init(liveVideoRef.current);
+      }
+    } else if (!liveStreamingActive && faceTrackerRef.current) {
+      faceTrackerRef.current.stop();
+      faceTrackerRef.current = null;
+      setFaceStatus({ status: "idle", message: "" });
+    }
+  }, [liveStreamingActive, step, token]);
 
   // Timer + heartbeat loop during active exam
   useEffect(() => {
@@ -1101,6 +1137,56 @@ function CandidateExamRunner() {
                         background: "#000",
                       }}
                     />
+                    {faceStatus.status !== "idle" && (
+                      <div
+                        style={{
+                          marginTop: 6,
+                          padding: "4px 8px",
+                          borderRadius: 6,
+                          fontSize: "0.74rem",
+                          fontWeight: 600,
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 5,
+                          background:
+                            faceStatus.status === "ok"
+                              ? "#ecfdf5"
+                              : faceStatus.status === "gaze"
+                              ? "#fefce8"
+                              : faceStatus.status === "loading"
+                              ? "#f1f5f9"
+                              : "#fef2f2",
+                          color:
+                            faceStatus.status === "ok"
+                              ? "#065f46"
+                              : faceStatus.status === "gaze"
+                              ? "#854d0e"
+                              : faceStatus.status === "loading"
+                              ? "#475569"
+                              : "#991b1b",
+                          border: `1px solid ${
+                            faceStatus.status === "ok"
+                              ? "#a7f3d0"
+                              : faceStatus.status === "gaze"
+                              ? "#fde047"
+                              : faceStatus.status === "loading"
+                              ? "#cbd5e1"
+                              : "#fecaca"
+                          }`,
+                        }}
+                      >
+                        <span>
+                          {faceStatus.status === "ok"
+                            ? "🟢"
+                            : faceStatus.status === "gaze"
+                            ? "🟡"
+                            : faceStatus.status === "loading"
+                            ? "⏳"
+                            : "🔴"}
+                        </span>
+                        <span>{faceStatus.message}</span>
+                      </div>
+                    )}
                   </div>
                 )}
                 <button type="button" className="btn btn-primary" style={{ width: "100%" }} onClick={submitManual}>

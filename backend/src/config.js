@@ -98,5 +98,6 @@ export function loadConfig(overrides = {}) {
     cookieSameSite: overrides.cookieSameSite || process.env.EXAM_PORTAL_COOKIE_SAMESITE || "Lax",
     rateLimitAuthPerMin: Number(overrides.rateLimitAuthPerMin ?? process.env.EXAM_PORTAL_RATE_AUTH ?? 25),
     rateLimitApiPerMin: Number(overrides.rateLimitApiPerMin ?? process.env.EXAM_PORTAL_RATE_API ?? 180),
+    groqApiKey: String(overrides.groqApiKey ?? process.env.GROQ_API_KEY ?? "").trim(),
   };
 }

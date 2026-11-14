@@ -603,6 +603,80 @@ export function createApp(config) {
     })
   );
 
+  // ---- Face Tracking Anti-Cheat ----
+
+  // POST /api/candidate/face-events  (candidate-token auth)
+  // Body: { events: [{type, detail, occurred_at}], signals: {windowSeconds, faceAbsentCount, multipleFacesCount, gazeDeviationCount, totalFrames} }
+  app.post(
+    "/api/candidate/face-events",
+    rateLimit("api_write", config.rateLimitApiPerMin),
+    wrap(async (req, res) => {
+      const token = req.get("X-Candidate-Token") || String(req.body?.token || "");
+      const rawEvents = Array.isArray(req.body?.events) ? req.body.events : [];
+      const signals = req.body?.signals || {};
+
+      // Validate token and get attempt
+      const attempt = await service.getCandidateLiveWebcamToken(token);
+      if (!attempt || !attempt.attempt_id) {
+        throw new PortalError("Invalid or expired candidate token.", 401, "unauthorized");
+      }
+      const attemptId = attempt.attempt_id;
+
+      // Normalize events (support both event_type and type)
+      const events = rawEvents.map((e) => ({
+        event_type: e.event_type || e.type,
+        detail: typeof e.detail === "object" ? e.detail : { info: String(e.detail || "") },
+        occurred_at: e.occurred_at || nowTs(),
+      }));
+
+      // Record events into session_events table using existing service method
+      if (events.length > 0) {
+        await service.recordCandidateEvents(token, events);
+      }
+
+      // Groq analysis
+      let riskResult = { risk: "unknown", verdict: "Pending analysis.", flags: [] };
+      if (signals && typeof signals === "object" && Object.keys(signals).length > 0) {
+        const { analyzeFaceSignals } = await import("./groq-analysis.js");
+        riskResult = await analyzeFaceSignals(signals, attemptId, config.groqApiKey);
+      }
+
+      res.json({ recorded: events.length, ...riskResult });
+    })
+  );
+
+  // GET /api/attempts/:attemptId/face-analysis  (staff auth)
+  app.get(
+    "/api/attempts/:attemptId/face-analysis",
+    rateLimit("api_read", config.rateLimitApiPerMin),
+    wrap(async (req, res) => {
+      const session = await actorFromReq(req, false);
+      if (!session) throw new PortalError("Not authenticated.", "unauthenticated", 401);
+
+      const { attemptId } = req.params;
+      const { getLatestVerdict } = await import("./groq-analysis.js");
+      const cached = getLatestVerdict(attemptId);
+
+      // Fetch recent face events from session_events
+      const faceEventTypes = ["face_absent", "multiple_faces", "gaze_deviation", "face_detected"];
+      const allEvents = await service.getAttemptEvents(attemptId);
+      const faceEvents = allEvents.filter(e => faceEventTypes.includes(e.event_type));
+
+      const counts = { face_absent: 0, multiple_faces: 0, gaze_deviation: 0, face_detected: 0 };
+      for (const e of faceEvents) counts[e.event_type] = (counts[e.event_type] || 0) + 1;
+
+      res.json({
+        attemptId,
+        risk: cached?.risk || "unknown",
+        verdict: cached?.verdict || "No analysis yet.",
+        flags: cached?.flags || [],
+        updatedAt: cached?.updatedAt || null,
+        event_counts: counts,
+        recentEvents: faceEvents.slice(-50),
+      });
+    })
+  );
+
   // ---- 404 & Error Handler ----
   app.use((req, res) => {
     res.status(404).json({ error: "API endpoint not found.", code: "not_found" });

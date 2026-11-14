@@ -1506,12 +1506,33 @@ function LiveWebcamMonitor({
   const [statusLabel, setStatusLabel] = useState("Idle");
   const [frameUrl, setFrameUrl] = useState("");
   const [lastFrameAt, setLastFrameAt] = useState(null);
+  const [faceAnalysis, setFaceAnalysis] = useState(null);
 
   const wsRef = useRef(null);
   const fallbackTimerRef = useRef(null);
   const prevUrlRef = useRef("");
   const lastWsFrameAtRef = useRef(0);
   const autoTriggeredRef = useRef(false);
+
+  useEffect(() => {
+    let cancel = false;
+    const fetchAnalysis = async () => {
+      try {
+        const data = await apiFetch(`/api/attempts/${attemptId}/face-analysis`);
+        if (!cancel && data) {
+          setFaceAnalysis(data);
+        }
+      } catch {
+        // ignore polling errors
+      }
+    };
+    fetchAnalysis();
+    const interval = setInterval(fetchAnalysis, 7000);
+    return () => {
+      cancel = true;
+      clearInterval(interval);
+    };
+  }, [attemptId]);
 
   const updateFrameBlob = useCallback((blob) => {
     if (!blob || blob.size === 0) return;
@@ -1718,6 +1739,97 @@ function LiveWebcamMonitor({
           Real-time in-memory webcam preview. No video is recorded or stored on disk. Click{" "}
           <strong>Start Live Preview</strong> to view the candidate&apos;s camera.
         </p>
+      )}
+
+      {/* AI Proctoring & Face Tracking Analysis */}
+      {faceAnalysis && (
+        <div
+          style={{
+            marginTop: 10,
+            padding: "10px 14px",
+            borderRadius: 7,
+            background:
+              faceAnalysis.risk === "high"
+                ? "#fef2f2"
+                : faceAnalysis.risk === "medium"
+                ? "#fffbeb"
+                : "#f0fdf4",
+            border: `1px solid ${
+              faceAnalysis.risk === "high"
+                ? "#fecaca"
+                : faceAnalysis.risk === "medium"
+                ? "#fde68a"
+                : "#bbf7d0"
+            }`,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6, flexWrap: "wrap", gap: 6 }}>
+            <span style={{ fontSize: "0.85rem", fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
+              <span>🧠 AI Anti-Cheat Proctor (Groq LLM)</span>
+            </span>
+            <span
+              className={`badge ${
+                faceAnalysis.risk === "high"
+                  ? "badge-red"
+                  : faceAnalysis.risk === "medium"
+                  ? "badge-amber"
+                  : faceAnalysis.risk === "low"
+                  ? "badge-green"
+                  : "badge-slate"
+              }`}
+              style={{ fontWeight: 700 }}
+            >
+              {faceAnalysis.risk === "high"
+                ? "🚨 High Cheating Risk"
+                : faceAnalysis.risk === "medium"
+                ? "⚠️ Suspicious Patterns"
+                : faceAnalysis.risk === "low"
+                ? "✅ Low Risk / Verified"
+                : "Awaiting Signals"}
+            </span>
+          </div>
+
+          <p style={{ margin: "4px 0 6px 0", fontSize: "0.82rem", color: "#1e293b", lineHeight: 1.45 }}>
+            {faceAnalysis.verdict || "Monitoring candidate face orientation, presence, and multiple identities in real time..."}
+          </p>
+
+          {faceAnalysis.event_counts && (
+            <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap", fontSize: "0.75rem" }}>
+              <span className="badge badge-slate" style={{ background: "#e2e8f0" }}>
+                Face Absent: <strong>{faceAnalysis.event_counts.face_absent || 0}</strong>
+              </span>
+              <span
+                className={`badge ${(faceAnalysis.event_counts.multiple_faces || 0) > 0 ? "badge-red" : "badge-slate"}`}
+                style={{ background: (faceAnalysis.event_counts.multiple_faces || 0) > 0 ? undefined : "#e2e8f0" }}
+              >
+                Multiple Faces: <strong>{faceAnalysis.event_counts.multiple_faces || 0}</strong>
+              </span>
+              <span className="badge badge-slate" style={{ background: "#e2e8f0" }}>
+                Gaze Deviations: <strong>{faceAnalysis.event_counts.gaze_deviation || 0}</strong>
+              </span>
+            </div>
+          )}
+
+          {Array.isArray(faceAnalysis.flags) && faceAnalysis.flags.length > 0 && (
+            <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {faceAnalysis.flags.map((flag, idx) => (
+                <span
+                  key={idx}
+                  style={{
+                    fontSize: "0.72rem",
+                    padding: "2px 7px",
+                    borderRadius: 4,
+                    background: "#fee2e2",
+                    color: "#991b1b",
+                    fontWeight: 600,
+                  }}
+                >
+                  ⚠ {flag}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -2024,12 +2136,27 @@ function AttemptReviewModal({ attemptId, autoStartLive = false, user, csrfToken,
         <hr style={{ border: "none", borderTop: "1px solid var(--border)", margin: "14px 0" }} />
 
         <h3 style={{ margin: "0 0 8px 0", fontSize: "1rem" }}>Session Event Signals</h3>
-        <div className="btn-group" style={{ marginBottom: 10 }}>
+        <div className="btn-group" style={{ marginBottom: 10, flexWrap: "wrap", gap: 6 }}>
           <span className="badge badge-slate">Tab Hidden: {detail.signal_summary.tab_hidden}</span>
           <span className="badge badge-slate">Window Blur: {detail.signal_summary.window_blur}</span>
           <span className="badge badge-slate">Fullscreen Exits: {detail.signal_summary.fullscreen_exited}</span>
           <span className="badge badge-slate">Copy/Paste Blocked: {detail.signal_summary.copy_paste_blocked || 0}</span>
           <span className="badge badge-slate">Network Interruptions: {detail.signal_summary.network_interruptions}</span>
+          {typeof detail.signal_summary.face_absent === "number" && (
+            <span className={`badge ${detail.signal_summary.face_absent > 0 ? "badge-amber" : "badge-slate"}`}>
+              Face Absent: {detail.signal_summary.face_absent}
+            </span>
+          )}
+          {typeof detail.signal_summary.multiple_faces === "number" && (
+            <span className={`badge ${detail.signal_summary.multiple_faces > 0 ? "badge-red" : "badge-slate"}`}>
+              Multiple Faces: {detail.signal_summary.multiple_faces}
+            </span>
+          )}
+          {typeof detail.signal_summary.gaze_deviation === "number" && (
+            <span className={`badge ${detail.signal_summary.gaze_deviation > 0 ? "badge-amber" : "badge-slate"}`}>
+              Gaze Deviations: {detail.signal_summary.gaze_deviation}
+            </span>
+          )}
         </div>
 
         <div

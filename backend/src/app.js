@@ -542,7 +542,12 @@ export function createApp(config) {
     rateLimit("live_frame_read", Math.max(config.rateLimitApiPerMin, 1200)),
     wrap(async (req, res) => {
       const actor = await actorFromReq(req, false);
-      const frame = await service.getLiveWebcamFrame(actor, req.params.attemptId);
+      const result = await service.getLiveWebcamFrame(actor, req.params.attemptId);
+      if (result?.ended) {
+        res.status(410).json({ status: result.status, active: false, message: "Attempt is no longer in progress." });
+        return;
+      }
+      const frame = result?.frame || (Buffer.isBuffer(result) ? result : null);
       if (!frame) {
         res.status(204).end();
         return;
@@ -744,6 +749,7 @@ export function createApp(config) {
       res.status(400).json({ error: "Invalid JSON request body.", code: "invalid_json" });
       return;
     }
+    console.error(`[API Error] ${req.method} ${req.originalUrl || req.url}:`, err);
     res.status(500).json({ error: `Internal server error: ${err?.message || err}`, code: "internal_error" });
   });
 
@@ -761,6 +767,16 @@ export default function handler(req, res) {
     cachedDefaultApp = createApp(loadConfig()).app;
   }
   return cachedDefaultApp(req, res);
+}
+
+if (!globalThis.__veritas_error_listeners_attached) {
+  globalThis.__veritas_error_listeners_attached = true;
+  process.on("unhandledRejection", (reason) => {
+    console.error("[Unhandled Rejection]:", reason);
+  });
+  process.on("uncaughtException", (error) => {
+    console.error("[Uncaught Exception]:", error);
+  });
 }
 
 

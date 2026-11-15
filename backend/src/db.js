@@ -520,26 +520,73 @@ export class Database {
   }
 }
 
+const GLOBAL_POOL_KEY = Symbol.for("veritas.pgPool");
+const GLOBAL_INIT_KEY = Symbol.for("veritas.pgInitialized");
+
+/**
+ * Normalizes PostgreSQL connection string for serverless deployment.
+ * If connecting to Supabase PgBouncer session mode (port 5432), switches to port 6543 (transaction mode)
+ * to avoid "max client limit reached in session mode - max clients are limited to pool_size : 15".
+ */
+export function normalizePgConnectionString(connStr) {
+  if (!connStr || typeof connStr !== "string") return connStr;
+  let str = connStr.trim();
+  // Auto-switch Supabase pooler from 5432 (session mode limit: 15) to 6543 (transaction mode limit: 1000s)
+  if (str.includes(".pooler.supabase.com:5432/")) {
+    str = str.replace(".pooler.supabase.com:5432/", ".pooler.supabase.com:6543/");
+  }
+  return str;
+}
+
+function getOrCreatePgPool(connectionString, ssl) {
+  const normalizedStr = normalizePgConnectionString(connectionString);
+
+  if (globalThis[GLOBAL_POOL_KEY]) {
+    return globalThis[GLOBAL_POOL_KEY];
+  }
+
+  const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+  // In serverless, each function only needs 1 connection to prevent exhausting the Supabase pool
+  const maxConns = Number(process.env.PG_POOL_MAX || (isServerless ? 1 : 3));
+
+  const pool = new Pool({
+    connectionString: normalizedStr,
+    ssl: ssl ? { rejectUnauthorized: false } : false,
+    max: maxConns,
+    idleTimeoutMillis: isServerless ? 2000 : 8000,
+    connectionTimeoutMillis: 5000,
+    allowExitOnIdle: true,
+  });
+
+  pool.on("error", (err) => {
+    console.error("[PostgreSQL Pool Error]:", err?.message || err);
+  });
+
+  globalThis[GLOBAL_POOL_KEY] = pool;
+  return pool;
+}
+
 export class PgDatabase {
   constructor(connectionString, { ssl = true } = {}) {
     this.dialect = "postgres";
-    this.connectionString = connectionString;
-    this.pool = new Pool({
-      connectionString,
-      ssl: ssl ? { rejectUnauthorized: false } : false,
-      max: Number(process.env.PG_POOL_MAX || (process.env.VERCEL ? 5 : 10)),
-      idleTimeoutMillis: 30000,
-    });
+    this.connectionString = normalizePgConnectionString(connectionString);
+    this.pool = getOrCreatePgPool(this.connectionString, ssl);
     this._txStorage = new AsyncLocalStorage();
     this._initPromise = null;
   }
 
   async init() {
+    if (globalThis[GLOBAL_INIT_KEY]) return;
     if (!this._initPromise) {
-      this._initPromise = this.pool.query(SCHEMA_PG_SQL).catch((err) => {
-        this._initPromise = null;
-        throw err;
-      });
+      this._initPromise = this.pool.query(SCHEMA_PG_SQL)
+        .then(() => {
+          globalThis[GLOBAL_INIT_KEY] = true;
+        })
+        .catch((err) => {
+          this._initPromise = null;
+          console.error("[PostgreSQL Init Error]:", err?.message || err);
+          throw err;
+        });
     }
     await this._initPromise;
   }

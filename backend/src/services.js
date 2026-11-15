@@ -85,6 +85,7 @@ export class PortalService {
     this.db = db;
     this.config = config;
     this._lastWebcamDbWrite = new Map();
+    this._sessionCache = new Map();
   }
 
   async _audit({
@@ -317,18 +318,28 @@ export class PortalService {
       throw new PortalError("Invalid session.", 401, "unauthorized");
     }
 
-    const row = await this.db.get(
-      `SELECT s.id AS session_id, s.csrf_token, s.mfa_verified, s.expires_at,
-              u.id, u.organization_id, u.email, u.full_name, u.role, u.mfa_enabled, u.is_active,
-              o.name AS organization_name, o.slug AS organization_slug, o.retention_days
-       FROM sessions s
-       JOIN users u ON u.id = s.user_id
-       JOIN organizations o ON o.id = u.organization_id
-       WHERE s.token_hash = ?`,
-      hashToken(rawToken)
-    );
+    const tokenHash = hashToken(rawToken);
+    const now = nowTs();
+    let row = this._sessionCache.get(tokenHash);
+    if (!row || row._cacheExp < now) {
+      row = await this.db.get(
+        `SELECT s.id AS session_id, s.csrf_token, s.mfa_verified, s.expires_at,
+                u.id, u.organization_id, u.email, u.full_name, u.role, u.mfa_enabled, u.is_active,
+                o.name AS organization_name, o.slug AS organization_slug, o.retention_days
+         FROM sessions s
+         JOIN users u ON u.id = s.user_id
+         JOIN organizations o ON o.id = u.organization_id
+         WHERE s.token_hash = ?`,
+        tokenHash
+      );
+      if (row) {
+        row._cacheExp = now + 5; // 5-second TTL eliminates redundant queries during high-rate polling
+        this._sessionCache.set(tokenHash, row);
+      }
+    }
 
-    if (!row || !row.is_active || row.expires_at <= nowTs()) {
+    if (!row || !row.is_active || row.expires_at <= now) {
+      this._sessionCache.delete(tokenHash);
       throw new PortalError("Session expired. Please sign in again.", 401, "unauthorized");
     }
     if (!row.mfa_verified) {
@@ -357,7 +368,9 @@ export class PortalService {
     if (!sessionCookie) return;
     const rawToken = verifySignedValue(this.config.secretKey, sessionCookie);
     if (!rawToken) return;
-    await this.db.run("DELETE FROM sessions WHERE token_hash = ?", hashToken(rawToken));
+    const tokenHash = hashToken(rawToken);
+    this._sessionCache.delete(tokenHash);
+    await this.db.run("DELETE FROM sessions WHERE token_hash = ?", tokenHash);
   }
 
   async getUserContext(userId) {
@@ -2322,8 +2335,10 @@ export class PortalService {
       actor.organization_id
     );
     if (!att) throw new PortalError("Attempt not found.", 404, "not_found");
-    if (att.status !== "in_progress") return { token: null, active: false };
-    return { token: att.live_webcam_token || null, active: Boolean(att.live_webcam_active) };
+    if (att.status !== "in_progress") {
+      return { token: null, active: false, status: att.status, ended: true };
+    }
+    return { token: att.live_webcam_token || null, active: Boolean(att.live_webcam_active), status: att.status, ended: false };
   }
 
   /** Admin stops the live stream, clears the token and closes relay sockets. */
@@ -2398,10 +2413,14 @@ export class PortalService {
 
   /** Fetches the latest transient JPEG frame from memory or PostgreSQL ephemeral row. */
   async getLiveWebcamFrame(actor, attemptId) {
-    const { token } = await this.getLiveWebcamToken(actor, attemptId);
-    if (!token) return null;
+    const streamInfo = await this.getLiveWebcamToken(actor, attemptId);
+    if (streamInfo.ended) {
+      return { ended: true, status: streamInfo.status };
+    }
+    const token = streamInfo.token;
+    if (!token) return { frame: null, ended: false };
     const latestMem = getLatestLiveFrame(token);
-    if (latestMem?.frame) return latestMem.frame;
+    if (latestMem?.frame) return { frame: latestMem.frame, ended: false };
     if (this.db.dialect === "postgres") {
       const row = await this.db.get(
         "SELECT frame_data FROM live_webcam_frames WHERE attempt_id = ? AND updated_at >= ?",
@@ -2409,10 +2428,13 @@ export class PortalService {
         nowTs() - 15
       );
       if (row?.frame_data) {
-        return Buffer.isBuffer(row.frame_data) ? row.frame_data : Buffer.from(row.frame_data);
+        return {
+          frame: Buffer.isBuffer(row.frame_data) ? row.frame_data : Buffer.from(row.frame_data),
+          ended: false,
+        };
       }
     }
-    return null;
+    return { frame: null, ended: false };
   }
 
   // ------------------------------------------------------------------

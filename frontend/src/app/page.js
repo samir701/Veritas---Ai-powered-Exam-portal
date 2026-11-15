@@ -1748,7 +1748,13 @@ function LiveWebcamMonitor({
               await handleIncomingAdminSignal(s);
             }
           }
-        } catch {}
+        } catch (sigErr) {
+          if (sigErr?.status === 410 || (sigErr?.message && (sigErr.message.includes("not in progress") || sigErr.message.includes("not found")))) {
+            disconnectViewer();
+            setStatusLabel("Exam Submitted / Ended");
+            if (onStatusChange) onStatusChange();
+          }
+        }
       }, 700);
 
       // HTTP frame fallback (or primary over HTTPS Next.js proxy)
@@ -1762,6 +1768,11 @@ function LiveWebcamMonitor({
           if (r.status === 200) {
             const blob = await r.blob();
             updateFrameBlob(blob);
+          } else if (r.status === 410) {
+            // Attempt is submitted or finished - stop polling and notify parent
+            disconnectViewer();
+            setStatusLabel("Exam Submitted / Ended");
+            if (onStatusChange) onStatusChange();
           }
         } catch {
           // ignore transient poll errors
@@ -1770,8 +1781,14 @@ function LiveWebcamMonitor({
 
       if (onStatusChange) onStatusChange();
     } catch (err) {
-      setStatusLabel("Error");
-      if (notify) notify(err.message, "danger");
+      if (err?.message && (err.message.includes("not in progress") || err.message.includes("not found"))) {
+        disconnectViewer();
+        setStatusLabel("Exam Ended");
+        if (onStatusChange) onStatusChange();
+      } else {
+        setStatusLabel("Error");
+        if (notify) notify(err.message, "danger");
+      }
     }
   }, [attemptId, canControl, csrfToken, disconnectViewer, notify, onStatusChange, updateFrameBlob]);
 
@@ -2003,6 +2020,13 @@ function LiveWebcamMonitor({
 }
 
 function LiveProctoringSection({ user, csrfToken, attempts, invitations, onRefresh, onInspect, notify }) {
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (onRefresh) onRefresh();
+    }, 6000);
+    return () => clearInterval(timer);
+  }, [onRefresh]);
+
   const canControl = user.role === "admin" || user.role === "interviewer";
   const activeAttempts = attempts.filter((a) => a.status === "in_progress" && !a.is_anonymized);
   const scheduledLiveInvites = invitations.filter(

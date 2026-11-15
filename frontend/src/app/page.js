@@ -1514,6 +1514,20 @@ function LiveWebcamMonitor({
   const lastWsFrameAtRef = useRef(0);
   const autoTriggeredRef = useRef(false);
 
+  const [webRtcActive, setWebRtcActive] = useState(false);
+  const [webRtcStream, setWebRtcStream] = useState(null);
+  const webrtcVideoRef = useRef(null);
+  const webrtcPcRef = useRef(null);
+  const webrtcSignalTimerRef = useRef(null);
+  const lastAdminSignalTsRef = useRef(0);
+
+  useEffect(() => {
+    if (webrtcVideoRef.current && webRtcStream) {
+      webrtcVideoRef.current.srcObject = webRtcStream;
+      webrtcVideoRef.current.play().catch(() => {});
+    }
+  }, [webRtcStream, webRtcActive]);
+
   useEffect(() => {
     let cancel = false;
     const fetchAnalysis = async () => {
@@ -1551,6 +1565,19 @@ function LiveWebcamMonitor({
       clearInterval(fallbackTimerRef.current);
       fallbackTimerRef.current = null;
     }
+    if (webrtcSignalTimerRef.current) {
+      clearInterval(webrtcSignalTimerRef.current);
+      webrtcSignalTimerRef.current = null;
+    }
+    if (webrtcPcRef.current) {
+      try {
+        webrtcPcRef.current.close();
+      } catch {}
+      webrtcPcRef.current = null;
+    }
+    setWebRtcActive(false);
+    setWebRtcStream(null);
+    lastAdminSignalTsRef.current = 0;
     try {
       wsRef.current?.close();
     } catch {}
@@ -1595,6 +1622,89 @@ function LiveWebcamMonitor({
 
       const apiBase = getApiBase();
       const shouldUseHttpOnly = window.location.protocol === "https:" && !apiBase;
+
+      const sendAdminSignal = async (signalData) => {
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try {
+            ws.send(JSON.stringify({ type: "webrtc-signal", signal: signalData }));
+            return;
+          } catch {}
+        }
+        try {
+          await apiFetch(`/api/attempts/${attemptId}/webrtc/signal`, {
+            method: "POST",
+            csrfToken,
+            body: { signal: signalData },
+          });
+        } catch {}
+      };
+
+      const handleIncomingAdminSignal = async (sig) => {
+        const pc = webrtcPcRef.current;
+        if (!pc) return;
+        if (sig.type === "answer" && sig.sdp) {
+          try {
+            if (pc.signalingState === "have-local-offer") {
+              await pc.setRemoteDescription(new RTCSessionDescription(sig.sdp));
+            }
+          } catch (e) {
+            console.error("[WebRTC] Error setting remote answer:", e);
+          }
+        } else if (sig.type === "ice-candidate" && sig.candidate) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(sig.candidate));
+          } catch {}
+        }
+      };
+
+      // Initiate WebRTC Viewer PeerConnection for 30 FPS ultra-low latency (<100ms)
+      if (typeof RTCPeerConnection !== "undefined") {
+        try {
+          const pc = new RTCPeerConnection({
+            iceServers: [
+              { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+            ],
+          });
+          webrtcPcRef.current = pc;
+
+          pc.ontrack = (event) => {
+            if (event.streams && event.streams[0]) {
+              const stream = event.streams[0];
+              setWebRtcStream(stream);
+              setWebRtcActive(true);
+              setStatusLabel("WebRTC Live (<100ms)");
+            }
+          };
+
+          pc.onicecandidate = (event) => {
+            if (event.candidate) {
+              sendAdminSignal({ type: "ice-candidate", candidate: event.candidate });
+            }
+          };
+
+          pc.onconnectionstatechange = () => {
+            if (pc.connectionState === "connected") {
+              setWebRtcActive(true);
+              setStatusLabel("WebRTC Live (<100ms)");
+            } else if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+              setWebRtcActive(false);
+            }
+          };
+
+          pc.addTransceiver("video", { direction: "recvonly" });
+
+          pc.createOffer()
+            .then(async (offer) => {
+              await pc.setLocalDescription(offer);
+              await sendAdminSignal({ type: "offer", sdp: pc.localDescription });
+            })
+            .catch((e) => console.error("[WebRTC] Offer error:", e));
+        } catch (rtcErr) {
+          console.error("[WebRTC] PeerConnection init failed:", rtcErr);
+        }
+      }
+
       if (!shouldUseHttpOnly) {
         const wsUrl = getWebSocketUrl(`/live-webcam?token=${encodeURIComponent(token)}&role=admin`);
         try {
@@ -1606,6 +1716,13 @@ function LiveWebcamMonitor({
             if (event.data instanceof ArrayBuffer) {
               lastWsFrameAtRef.current = Date.now();
               updateFrameBlob(new Blob([event.data], { type: "image/jpeg" }));
+            } else if (typeof event.data === "string") {
+              try {
+                const msg = JSON.parse(event.data);
+                if (msg.type === "webrtc-signal" && msg.signal) {
+                  handleIncomingAdminSignal(msg.signal);
+                }
+              } catch {}
             }
           };
 
@@ -1616,6 +1733,23 @@ function LiveWebcamMonitor({
           // ignore WS errors; HTTP fallback handles preview
         }
       }
+
+      // Fast signaling poll for WebRTC handshake over HTTP
+      webrtcSignalTimerRef.current = setInterval(async () => {
+        try {
+          const res = await apiFetch(
+            `/api/attempts/${attemptId}/webrtc/signal?since=${lastAdminSignalTsRef.current}`
+          );
+          if (Array.isArray(res.signals)) {
+            for (const s of res.signals) {
+              if (s.timestamp > lastAdminSignalTsRef.current) {
+                lastAdminSignalTsRef.current = s.timestamp;
+              }
+              await handleIncomingAdminSignal(s);
+            }
+          }
+        } catch {}
+      }, 700);
 
       // HTTP frame fallback (or primary over HTTPS Next.js proxy)
       fallbackTimerRef.current = setInterval(async () => {
@@ -1700,7 +1834,40 @@ function LiveWebcamMonitor({
       </div>
 
       {watching ? (
-        frameUrl ? (
+        webRtcActive && webRtcStream ? (
+          <div style={{ position: "relative", maxWidth: 480, width: "100%" }}>
+            <video
+              ref={webrtcVideoRef}
+              autoPlay
+              playsInline
+              muted
+              style={{
+                display: "block",
+                width: "100%",
+                maxWidth: 480,
+                borderRadius: 8,
+                background: "#000",
+                border: "2px solid #22c55e",
+              }}
+            />
+            <div
+              style={{
+                position: "absolute",
+                top: 8,
+                left: 8,
+                background: "rgba(16, 185, 129, 0.9)",
+                color: "#fff",
+                padding: "2px 8px",
+                borderRadius: 4,
+                fontSize: "0.72rem",
+                fontWeight: 700,
+                letterSpacing: "0.02em",
+              }}
+            >
+              ⚡ WebRTC Live (&lt;100ms)
+            </div>
+          </div>
+        ) : frameUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={frameUrl}

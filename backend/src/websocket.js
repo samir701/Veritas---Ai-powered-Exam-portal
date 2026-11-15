@@ -10,6 +10,75 @@ import { WebSocketServer } from "ws";
 // Map<token, { candidate: WebSocket|null, admins: Set<WebSocket>, latestFrame: Buffer|null, updatedAt: number }>
 const sessions = new Map();
 
+// In-memory WebRTC signaling queue: token -> { toCandidate: Array<{ id, type, payload, timestamp }>, toAdmin: Array<{ id, type, payload, timestamp }> }
+const webrtcSignals = new Map();
+
+function getOrCreateSignals(token) {
+  let item = webrtcSignals.get(token);
+  if (!item) {
+    item = { toCandidate: [], toAdmin: [] };
+    webrtcSignals.set(token, item);
+  }
+  return item;
+}
+
+/**
+ * Route a WebRTC signal (offer/answer/ice-candidate) to peer.
+ * @param {string} token
+ * @param {"candidate"|"admin"} senderRole
+ * @param {object} signalData
+ */
+export function postWebRtcSignal(token, senderRole, signalData) {
+  if (!token || !signalData) return;
+  const store = getOrCreateSignals(token);
+  const now = Date.now();
+  const entry = { id: Math.random().toString(36).slice(2), ...signalData, timestamp: now };
+
+  const targetList = senderRole === "candidate" ? store.toAdmin : store.toCandidate;
+  targetList.push(entry);
+  while (targetList.length > 60 || (targetList[0] && now - targetList[0].timestamp > 60000)) {
+    targetList.shift();
+  }
+
+  // Also push immediately over active WebSocket connections
+  const sess = sessions.get(token);
+  if (sess) {
+    const payload = JSON.stringify({ type: "webrtc-signal", signal: entry });
+    if (senderRole === "candidate") {
+      for (const adminWs of sess.admins) {
+        if (adminWs.readyState === 1 /* OPEN */) {
+          try {
+            adminWs.send(payload);
+          } catch {}
+        }
+      }
+    } else if (senderRole === "admin" && sess.candidate && sess.candidate.readyState === 1) {
+      try {
+        sess.candidate.send(payload);
+      } catch {}
+    }
+  }
+}
+
+/**
+ * Fetch pending WebRTC signals for role.
+ * @param {string} token
+ * @param {"candidate"|"admin"} recipientRole
+ * @param {number} since
+ */
+export function getWebRtcSignals(token, recipientRole, since = 0) {
+  if (!token) return [];
+  const store = webrtcSignals.get(token);
+  if (!store) return [];
+  const targetList = recipientRole === "candidate" ? store.toCandidate : store.toAdmin;
+  const sinceNum = Number(since) || 0;
+  return targetList.filter((s) => s.timestamp > sinceNum);
+}
+
+export function clearWebRtcSignals(token) {
+  if (token) webrtcSignals.delete(token);
+}
+
 function getOrCreateSession(token) {
   let sess = sessions.get(token);
   if (!sess) {
@@ -89,6 +158,7 @@ export function closeLiveWebcamSession(token) {
     } catch {}
   }
   sessions.delete(token);
+  clearWebRtcSignals(token);
 }
 
 /**
@@ -148,15 +218,30 @@ export function setupWebSocket(httpServer, db) {
       } catch {}
     }
 
-    if (role === "candidate") {
-      ws.on("message", (data, isBinary) => {
-        if (!isBinary) return;
-        const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
-        // Guard against oversized payloads (max 512 KB per JPEG frame)
-        if (buf.length > 512 * 1024) return;
-        broadcastLiveFrame(token, buf);
-      });
-    }
+    ws.on("message", (data, isBinary) => {
+      if (isBinary) {
+        if (role === "candidate") {
+          const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+          // Guard against oversized payloads (max 512 KB per JPEG frame)
+          if (buf.length > 512 * 1024) return;
+          broadcastLiveFrame(token, buf);
+        }
+        return;
+      }
+
+      // Handle WebRTC signaling text packets
+      try {
+        const text = typeof data === "string" ? data : data.toString("utf8");
+        const parsed = JSON.parse(text);
+        if (parsed.type === "webrtc-signal" && parsed.signal) {
+          postWebRtcSignal(token, role, parsed.signal);
+        } else if (parsed.type === "offer" || parsed.type === "answer" || parsed.type === "ice-candidate") {
+          postWebRtcSignal(token, role, parsed);
+        }
+      } catch {
+        // ignore non-json messages
+      }
+    });
 
     ws.on("close", () => {
       const s = sessions.get(token);

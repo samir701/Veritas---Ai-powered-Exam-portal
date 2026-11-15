@@ -553,6 +553,59 @@ export function createApp(config) {
     })
   );
 
+  // ---- WebRTC Ultra-Low Latency Signaling ----
+  app.post(
+    "/api/candidate/webrtc/signal",
+    rateLimit("webrtc_signal", Math.max(config.rateLimitApiPerMin, 600)),
+    wrap(async (req, res) => {
+      const candidateToken = req.get("X-Candidate-Token") || String(req.body?.token || "");
+      const { token } = await service.getCandidateLiveWebcamToken(candidateToken);
+      if (!token) throw new PortalError("Webcam session not active.", 404, "not_found");
+      const { postWebRtcSignal } = await import("./websocket.js");
+      postWebRtcSignal(token, "candidate", req.body?.signal || req.body);
+      res.json({ ok: true });
+    })
+  );
+
+  app.get(
+    "/api/candidate/webrtc/signal",
+    rateLimit("webrtc_signal", Math.max(config.rateLimitApiPerMin, 600)),
+    wrap(async (req, res) => {
+      const candidateToken = req.get("X-Candidate-Token") || String(req.query.token || "");
+      const { token } = await service.getCandidateLiveWebcamToken(candidateToken);
+      if (!token) return res.json({ signals: [] });
+      const { getWebRtcSignals } = await import("./websocket.js");
+      const signals = getWebRtcSignals(token, "candidate", req.query.since);
+      res.json({ signals });
+    })
+  );
+
+  app.post(
+    "/api/attempts/:attemptId/webrtc/signal",
+    rateLimit("webrtc_signal", Math.max(config.rateLimitApiPerMin, 600)),
+    wrap(async (req, res) => {
+      const actor = await actorFromReq(req, false);
+      const { token } = await service.getLiveWebcamToken(actor, req.params.attemptId);
+      if (!token) throw new PortalError("Webcam session not active.", 404, "not_found");
+      const { postWebRtcSignal } = await import("./websocket.js");
+      postWebRtcSignal(token, "admin", req.body?.signal || req.body);
+      res.json({ ok: true });
+    })
+  );
+
+  app.get(
+    "/api/attempts/:attemptId/webrtc/signal",
+    rateLimit("webrtc_signal", Math.max(config.rateLimitApiPerMin, 600)),
+    wrap(async (req, res) => {
+      const actor = await actorFromReq(req, false);
+      const { token } = await service.getLiveWebcamToken(actor, req.params.attemptId);
+      if (!token) return res.json({ signals: [] });
+      const { getWebRtcSignals } = await import("./websocket.js");
+      const signals = getWebRtcSignals(token, "admin", req.query.since);
+      res.json({ signals });
+    })
+  );
+
   // ---- Candidate Exam Workflow ----
   app.get(
     "/api/candidate/session",

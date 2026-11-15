@@ -95,6 +95,9 @@ function CandidateExamRunner() {
   const liveTokenRef = useRef(null);
   const faceTrackerRef = useRef(null);
   const [faceStatus, setFaceStatus] = useState({ status: "idle", message: "" });
+  const webrtcPcRef = useRef(null);
+  const lastSignalTsRef = useRef(0);
+  const signalPollTimerRef = useRef(null);
 
   const stopMedia = useCallback(() => {
     if (mediaStreamRef.current) {
@@ -124,6 +127,17 @@ function CandidateExamRunner() {
       faceTrackerRef.current.stop();
       faceTrackerRef.current = null;
     }
+    if (signalPollTimerRef.current) {
+      clearInterval(signalPollTimerRef.current);
+      signalPollTimerRef.current = null;
+    }
+    if (webrtcPcRef.current) {
+      try {
+        webrtcPcRef.current.close();
+      } catch {}
+      webrtcPcRef.current = null;
+    }
+    lastSignalTsRef.current = 0;
     setFaceStatus({ status: "idle", message: "" });
     liveTokenRef.current = null;
     setLiveStreamingActive(false);
@@ -386,6 +400,97 @@ function CandidateExamRunner() {
           ws = null;
         }
       }
+
+      // WebRTC Ultra-Low Latency Broadcaster
+      let pc = null;
+      if (typeof RTCPeerConnection !== "undefined") {
+        try {
+          pc = new RTCPeerConnection({
+            iceServers: [
+              { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+            ],
+          });
+          webrtcPcRef.current = pc;
+
+          stream.getTracks().forEach((track) => {
+            pc.addTrack(track, stream);
+          });
+
+          pc.onicecandidate = (event) => {
+            if (event.candidate) {
+              sendRtcSignal({ type: "ice-candidate", candidate: event.candidate });
+            }
+          };
+        } catch (rtcErr) {
+          console.error("[WebRTC] Candidate peer connection error:", rtcErr);
+        }
+      }
+
+      const sendRtcSignal = async (signalData) => {
+        const activeWs = liveWsRef.current;
+        if (activeWs && activeWs.readyState === WebSocket.OPEN) {
+          try {
+            activeWs.send(JSON.stringify({ type: "webrtc-signal", signal: signalData }));
+            return;
+          } catch {}
+        }
+        try {
+          await apiFetch("/api/candidate/webrtc/signal", {
+            method: "POST",
+            candidateToken: token,
+            body: { signal: signalData },
+          });
+        } catch {}
+      };
+
+      const handleIncomingRtcSignal = async (sig) => {
+        if (!pc || cancelled) return;
+        if (sig.type === "offer" && sig.sdp) {
+          try {
+            await pc.setRemoteDescription(new RTCSessionDescription(sig.sdp));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            await sendRtcSignal({ type: "answer", sdp: pc.localDescription });
+          } catch (offerErr) {
+            console.error("[WebRTC] Failed answering offer:", offerErr);
+          }
+        } else if (sig.type === "ice-candidate" && sig.candidate) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(sig.candidate));
+          } catch {}
+        }
+      };
+
+      if (ws) {
+        ws.onmessage = (event) => {
+          if (typeof event.data === "string") {
+            try {
+              const msg = JSON.parse(event.data);
+              if (msg.type === "webrtc-signal" && msg.signal) {
+                handleIncomingRtcSignal(msg.signal);
+              }
+            } catch {}
+          }
+        };
+      }
+
+      // Fast signaling poll as primary or fallback
+      signalPollTimerRef.current = setInterval(async () => {
+        if (cancelled) return;
+        try {
+          const res = await apiFetch(`/api/candidate/webrtc/signal?since=${lastSignalTsRef.current}`, {
+            candidateToken: token,
+          });
+          if (Array.isArray(res.signals)) {
+            for (const s of res.signals) {
+              if (s.timestamp > lastSignalTsRef.current) {
+                lastSignalTsRef.current = s.timestamp;
+              }
+              await handleIncomingRtcSignal(s);
+            }
+          }
+        } catch {}
+      }, 700);
 
       let lastHttpSend = 0;
       let sending = false;

@@ -369,8 +369,8 @@ function CandidateExamRunner() {
       await hiddenVideo.play().catch(() => {});
 
       const canvas = document.createElement("canvas");
-      canvas.width = 480;
-      canvas.height = 360;
+      canvas.width = 400;
+      canvas.height = 300;
       const ctx = canvas.getContext("2d");
 
       const shouldUseHttpOnly = window.location.protocol === "https:" && !getApiBase();
@@ -389,9 +389,12 @@ function CandidateExamRunner() {
 
       let lastHttpSend = 0;
       let sending = false;
+      let sendStartTime = 0;
       liveTimerRef.current = setInterval(() => {
-        if (cancelled || sending || hiddenVideo.readyState < 2 || !ctx) return;
+        // Throttle frame sends so a new frame is only captured if previous send is done (with timeout safeguard)
+        if (cancelled || (sending && Date.now() - sendStartTime < 4000) || hiddenVideo.readyState < 2 || !ctx) return;
         sending = true;
+        sendStartTime = Date.now();
         try {
           ctx.drawImage(hiddenVideo, 0, 0, canvas.width, canvas.height);
           canvas.toBlob(
@@ -404,22 +407,24 @@ function CandidateExamRunner() {
                   activeWs.send(buf);
                 } else {
                   const now = Date.now();
-                  if (now - lastHttpSend >= 450) {
+                  if (now - lastHttpSend >= 250) {
                     lastHttpSend = now;
                     await postCandidateLiveFrame(token, blob).catch(() => {});
                   }
                 }
+              } catch {
+                // Non-blocking: ignore transient send failures
               } finally {
                 sending = false;
               }
             },
             "image/jpeg",
-            0.65
+            0.5
           );
         } catch {
           sending = false;
         }
-      }, 220);
+      }, 280);
     }
 
     async function pollForToken() {

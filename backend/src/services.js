@@ -84,6 +84,7 @@ export class PortalService {
   constructor(db, config) {
     this.db = db;
     this.config = config;
+    this._lastWebcamDbWrite = new Map();
   }
 
   async _audit({
@@ -2337,6 +2338,7 @@ export class PortalService {
     if (att.live_webcam_token) {
       closeLiveWebcamSession(att.live_webcam_token);
     }
+    this._lastWebcamDbWrite?.delete(attemptId);
     await this.db.run("DELETE FROM live_webcam_frames WHERE attempt_id = ?", attemptId);
     await this.db.run("UPDATE attempts SET live_webcam_token = NULL, live_webcam_active = 0 WHERE id = ?", attemptId);
     await this._audit({
@@ -2371,14 +2373,24 @@ export class PortalService {
     if (Buffer.isBuffer(frameBuffer) && frameBuffer.length > 0 && frameBuffer.length <= 512 * 1024) {
       broadcastLiveFrame(token, frameBuffer);
       if (this.db.dialect === "postgres") {
-        await this.db.run(
-          `INSERT INTO live_webcam_frames (attempt_id, frame_data, updated_at)
-           VALUES (?, ?, ?)
-           ON CONFLICT (attempt_id) DO UPDATE SET frame_data = EXCLUDED.frame_data, updated_at = EXCLUDED.updated_at`,
-          attemptId,
-          frameBuffer,
-          nowTs()
-        );
+        const now = nowTs();
+        const lastWrite = this._lastWebcamDbWrite?.get(attemptId) || 0;
+        // Throttle PostgreSQL writes to at most once every 3 seconds per attempt to avoid latency on remote DBs
+        if (now - lastWrite >= 3) {
+          if (!this._lastWebcamDbWrite) this._lastWebcamDbWrite = new Map();
+          this._lastWebcamDbWrite.set(attemptId, now);
+          // Fire-and-forget non-blocking write
+          void this.db.run(
+            `INSERT INTO live_webcam_frames (attempt_id, frame_data, updated_at)
+             VALUES (?, ?, ?)
+             ON CONFLICT (attempt_id) DO UPDATE SET frame_data = EXCLUDED.frame_data, updated_at = EXCLUDED.updated_at`,
+            attemptId,
+            frameBuffer,
+            now
+          ).catch((err) => {
+            console.error("Non-blocking live webcam frame DB save failed:", err?.message || err);
+          });
+        }
       }
     }
     return { ok: true, active: true };

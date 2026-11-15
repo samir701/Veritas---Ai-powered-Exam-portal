@@ -634,14 +634,14 @@ export function createApp(config) {
         await service.recordCandidateEvents(token, events);
       }
 
-      // Groq analysis
-      let riskResult = { risk: "unknown", verdict: "Pending analysis.", flags: [] };
+      // Groq analysis in background (fire-and-forget) to avoid stalling candidate browser
       if (signals && typeof signals === "object" && Object.keys(signals).length > 0) {
-        const { analyzeFaceSignals } = await import("./groq-analysis.js");
-        riskResult = await analyzeFaceSignals(signals, attemptId, config.groqApiKey, config.groqModel);
+        import("./groq-analysis.js")
+          .then(({ analyzeFaceSignals }) => analyzeFaceSignals(signals, attemptId, config.groqApiKey, config.groqModel))
+          .catch(() => {});
       }
 
-      res.json({ recorded: events.length, ...riskResult });
+      res.json({ recorded: events.length, status: "ok" });
     })
   );
 

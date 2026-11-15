@@ -5,7 +5,7 @@
  * Only face signals (counts/types) are sent — no raw video frames.
  */
 
-const DETECTION_INTERVAL_MS = 600; // Run detection every 600ms
+const DETECTION_INTERVAL_MS = 750; // Run detection every 750ms
 const FLUSH_INTERVAL_MS = 10000;   // Flush events to backend every 10s
 const GAZE_CENTER_THRESHOLD = 0.28; // Fraction of face width for gaze deviation
 
@@ -51,6 +51,7 @@ export class FaceTracker {
     this._pendingEvents = [];
     this._videoEl = null;
     this._running = false;
+    this._detecting = false;
     this._totalFrames = 0;
     this._windowCounts = { face_absent: 0, multiple_faces: 0, gaze_deviation: 0, face_detected: 0 };
     this._windowStart = Date.now();
@@ -77,6 +78,7 @@ export class FaceTracker {
     }
 
     this._running = true;
+    this._detecting = false;
     this.onStatus({ status: "ok", message: "AI Proctoring Active" });
 
     this._detectionTimer = setInterval(() => this._detect(fa), DETECTION_INTERVAL_MS);
@@ -84,15 +86,17 @@ export class FaceTracker {
   }
 
   async _detect(fa) {
-    if (!this._running || !this._videoEl) return;
+    if (!this._running || !this._videoEl || this._detecting) return;
     const video = this._videoEl;
     if (video.readyState < 2 || video.paused || video.ended) return;
 
+    this._detecting = true;
     try {
+      // First detect all faces without landmarks to save substantial CPU
       const detections = await fa.detectAllFaces(
         video,
         new fa.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.45 })
-      ).withFaceLandmarks(true);
+      );
 
       this._totalFrames++;
       const now = new Date().toISOString();
@@ -113,21 +117,31 @@ export class FaceTracker {
       } else {
         this._consecutiveAbsent = 0;
         this._consecutiveMultiple = 0;
-        // Check gaze deviation using nose landmark vs center of bounding box
-        const landmarks = detections[0]?.landmarks;
-        const box = detections[0]?.detection?.box;
-        let isGazeDeviated = false;
 
-        if (landmarks && box && box.width > 0) {
-          const nose = landmarks.getNose();
-          if (nose && nose.length > 0) {
-            const noseTip = nose[nose.length - 1];
-            const faceCenterX = box.x + box.width / 2;
-            const deviationX = Math.abs(noseTip.x - faceCenterX) / box.width;
-            if (deviationX > GAZE_CENTER_THRESHOLD) {
-              isGazeDeviated = true;
+        // Only compute landmarks on single face to evaluate gaze deviation
+        let isGazeDeviated = false;
+        try {
+          const singleFace = await fa.detectSingleFace(
+            video,
+            new fa.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.45 })
+          ).withFaceLandmarks(true);
+
+          const landmarks = singleFace?.landmarks;
+          const box = singleFace?.detection?.box || detections[0]?.box;
+
+          if (landmarks && box && box.width > 0) {
+            const nose = landmarks.getNose();
+            if (nose && nose.length > 0) {
+              const noseTip = nose[nose.length - 1];
+              const faceCenterX = box.x + box.width / 2;
+              const deviationX = Math.abs(noseTip.x - faceCenterX) / box.width;
+              if (deviationX > GAZE_CENTER_THRESHOLD) {
+                isGazeDeviated = true;
+              }
             }
           }
+        } catch {
+          // Ignore landmark computation hiccups
         }
 
         if (isGazeDeviated) {
@@ -151,6 +165,8 @@ export class FaceTracker {
       }
     } catch {
       // Ignore frame detection hiccups
+    } finally {
+      this._detecting = false;
     }
   }
 
@@ -181,6 +197,7 @@ export class FaceTracker {
 
   stop() {
     this._running = false;
+    this._detecting = false;
     if (this._detectionTimer) clearInterval(this._detectionTimer);
     if (this._flushTimer) clearInterval(this._flushTimer);
     this._detectionTimer = null;
@@ -192,3 +209,4 @@ export class FaceTracker {
     }
   }
 }
+

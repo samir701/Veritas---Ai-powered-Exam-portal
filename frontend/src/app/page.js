@@ -1527,7 +1527,7 @@ function LiveWebcamMonitor({
       }
     };
     fetchAnalysis();
-    const interval = setInterval(fetchAnalysis, 7000);
+    const interval = setInterval(fetchAnalysis, 3500);
     return () => {
       cancel = true;
       clearInterval(interval);
@@ -1632,7 +1632,7 @@ function LiveWebcamMonitor({
         } catch {
           // ignore transient poll errors
         }
-      }, shouldUseHttpOnly ? 500 : 1000);
+      }, 350);
 
       if (onStatusChange) onStatusChange();
     } catch (err) {
